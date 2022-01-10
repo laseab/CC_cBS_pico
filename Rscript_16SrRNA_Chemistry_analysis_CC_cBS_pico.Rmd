@@ -1,0 +1,2337 @@
+---
+title: "Big_TS_OKG_tidy"
+author: "Laura Seidel"
+date: "10/29/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(vegan))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(gplots))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(ggpubr))
+suppressPackageStartupMessages(library(SRS))
+suppressPackageStartupMessages(library(Hmisc))
+suppressPackageStartupMessages(library(phyloseq))
+suppressPackageStartupMessages(library(zCompositions))
+suppressPackageStartupMessages(library(emmeans))
+suppressPackageStartupMessages(library(ggfortify))
+suppressPackageStartupMessages(library(ggiraphExtra))
+suppressPackageStartupMessages(library(scales))
+suppressPackageStartupMessages(library(ggthemes))
+suppressPackageStartupMessages(library(nlme))
+suppressPackageStartupMessages(library(lmerTest))
+suppressPackageStartupMessages(library(DESeq2))
+suppressPackageStartupMessages(library(apeglm))
+suppressPackageStartupMessages(library(zinbwave)) 
+suppressPackageStartupMessages(library(scran))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(VennDiagram))
+suppressPackageStartupMessages(library(pscl))
+suppressPackageStartupMessages(library(MASS))
+suppressPackageStartupMessages(library(CoDaSeq))
+suppressPackageStartupMessages(library(ALDEx2))
+```
+
+```{r temperature graph - Fig. 1}
+# read in table with data
+tempgraph <- read.csv("temp.csv")
+# include another column with numbers, because date column is not unique 
+tempgraph <- tempgraph %>% mutate(number=1:n())
+
+# plot the temperature graph
+plot <- ggplot(data=tempgraph, aes(x=number))+
+                geom_errorbar(aes(ymin=TEMP_AFFECT-std_dev_affected, 
+                                  ymax=TEMP_AFFECT+std_dev_affected), 
+                                  colour="gray76", alpha=0.1)+
+                geom_line(aes( y=TEMP_AFFECT), color="orange", size=3, alpha=0.4) +
+                ylab("°C")+
+                xlab("Date")
+                
+# include error bars into the plot
+plot <- plot +
+            geom_errorbar(aes(ymin=CONTROL-std_dev_control, 
+                              ymax=CONTROL+std_dev_control), 
+                              colour="gray76", alpha=0.1)+
+                 geom_line( aes( y=CONTROL), color="blue", size=1.5, alpha=0.4)
+                
+plot
+```
+
+```{r Temperature statistics - Supplemental Table S3}
+# compare surface and bottom water in each bay
+# read in table 
+temp_meta<- read.csv("temperature_surf_bot_meta.csv")
+# filter for each bay
+tempwarm <- temp_meta %>%
+            filter(bay %in% "temp_affect")
+tempcon<- temp_meta %>%
+            filter(bay %in% "control")
+
+# construct the model and run the anova
+Btemp <- lme(temperature ~ 1 + surf_bot * month, data=tempwarm, random=~1|site ,method="REML")
+Bcon <- lme(temperature ~ 1 + surf_bot * month, data=tempcon, random=~1|site, method="REML")##Best fit
+
+anova(Btemp)
+anova(Bcon)
+
+# Compare bays at surface or bottom water 
+temp_surf <- temp_meta %>% 
+              filter(surf_bot %in% "surface")
+
+temp_bott <- temp_meta %>% 
+              filter(surf_bot %in% "bottom")
+
+# construct the model and run the anova
+B_surf <- lme(temperature ~ 1 + bay * month, data=temp_surf, random=~1|site, method="REML")
+
+B_bott <- lme(temperature ~ 1 + bay * month, data=temp_bott, random=~1|site, method="REML")
+
+anova(B_surf)
+anova(B_bott)
+
+```
+
+
+```{r load tables}
+# Here we load in the data tables and join them together and make a table for bottom water and sediment samples
+
+# meta table
+meta <- read.csv("../16S data/All_month_combined/meta_al.csv")
+
+# count table from DADA2
+counts <- read.table("../16S data/All_month_combined/seqtab_finalGT.tab",stringsAsFactors =FALSE, header=TRUE)%>% 
+          gather(sample,count, 2:ncol(.))%>%
+          filter(count > 0)
+
+# taxonomic table from DADA2 
+# Change the NA to Unclassified with "zz" indexed (so they are always last in a bar plot ;) )
+taxa <- read.table("../16S data/All_month_combined/taxGT_final.tab",stringsAsFactors = FALSE, header=TRUE)%>%
+        replace_na(list(Phylum="zz_Unclassified"))%>% 
+        replace_na(list(Class="zz_Unclassified"))%>%
+        replace_na(list(Order="zz_Unclassified"))%>%
+        replace_na(list(Family="zz_Unclassified"))%>%
+        replace_na(list(Genus="zz_Unclassified"))%>%
+        replace_na(list(Species="zz_Unclassified"))
+
+## Version used for taxonomic annotation: GTDB version 86
+
+##Archaea and bacteria are in the dataset (Primer target mainly Bacteria, but also partly Archaea)
+
+##Unknown Cyano sequences on Genus Level (annotated as eukaryotic sequences)
+unknown_cyano_seq <- read.csv("unknown_cyanos.csv")
+
+# Combine all tables together
+ALL <- counts %>%
+  left_join(taxa, by="sequence") %>%
+  left_join(meta, by="sample")%>% 
+  filter(Family != "Mitochondria") %>% # get rid of possible Mitochondria
+  filter(Class != "Chloroplast") # get rid of possible Chloroplasts
+
+# Seperate tables for bottom water and sediment
+BW <- ALL %>% 
+  anti_join(unknown_cyano_seq, by="sequence")%>%
+  filter(material=="BW")
+
+SED<- ALL %>% 
+  anti_join(unknown_cyano_seq, by="sequence")%>%
+  filter(material=="SED")
+```
+
+```{r table formats}
+# Change table formats to suit for different down stream analysis
+
+#raw counts from both material BW and SED in wide format
+countsRAW <- ALL %>%  
+  anti_join(unknown_cyano_seq, by="sequence")%>%
+  dplyr::select(sequence, sample, count) %>% #select ISV, sample and relab
+  spread(sequence,count, fill= 0) %>% #wide format with sequence and count, filling gaps with 0
+  remove_rownames() %>% #remove of row names
+  column_to_rownames(var = "sample")
+
+# Filter BW
+# Filter counts less than 1000 (per sample) and calculate the relative abundance
+BW<- BW %>%
+  # Group by sample, to get access to the group wise sum of counts
+  group_by(sample) %>% 
+  # Filter to keep only rows from samples having at least 1000 counts
+  filter(sum(count) >= 1000) %>% 
+  # Since we have the data grouped, we can calculate the relative abundance here (per sample)
+  mutate(relab = count/sum(count))
+
+# Filter SED
+# we do the same for SED
+SED<- SED %>%
+  group_by(sample) %>% 
+  filter(sum(count) >= 1000) %>% 
+  mutate(relab = count/sum(count))
+
+
+# wide tables based on counts with the filtered BW and SED table
+
+# BW
+count_filt_BW <- BW%>% 
+  dplyr::select(sequence, sample, count) %>% #select ISV, sample and count
+  spread(sequence,count, fill= 0) %>% #wide format with sequence and count, filling gaps with 0
+  remove_rownames() %>% #remove of row names
+  column_to_rownames(var = "sample")#rename rownames, making sample column to rownname
+
+# SED
+count_filt_SED <- SED%>% 
+  dplyr::select(sequence, sample, count) %>% 
+  spread(sequence,count, fill= 0) %>%
+  remove_rownames() %>% 
+  column_to_rownames(var = "sample")
+
+# wide tables based on relative abundance with the filtered BW and SED table
+# BW
+relab_filt_BW <- BW %>% 
+  dplyr::select(sequence, sample, relab) %>% 
+  spread(sequence,relab, fill= 0) %>% 
+  remove_rownames() %>% 
+  column_to_rownames(var = "sample")
+
+# SED
+relab_filt_SED <- SED %>% 
+  dplyr::select(sequence, sample, relab) %>%
+  spread(sequence,relab, fill= 0) %>% 
+  remove_rownames() %>% 
+  column_to_rownames(var = "sample")
+
+# BW & SED only with the Phylum Cyanobacteria counts
+
+BW_cyano <- BW %>%
+  filter(Phylum %in% "Cyanobacteriota")%>%
+  dplyr::select(sequence, sample, count)%>%
+  spread(sample, count, fill=0)%>%
+  remove_rownames()%>%
+  column_to_rownames(var="sequence")
+
+SED_cyano <- SED %>%
+  filter(Phylum %in% "Cyanobacteriota")%>%
+  dplyr::select(sequence, sample, count)%>%
+  spread(sample, count, fill=0)%>%
+  remove_rownames()%>%
+  column_to_rownames(var="sequence")
+
+```
+
+```{r sequencing depth}
+# Take the table with BW and SED together
+ALL_sum<- ALL %>%
+  group_by(sample) %>% # group by sample
+  mutate(sum = sum(count)) # summarize the counts per sample
+
+# rearrange the order of the sampling month
+ALL_sum$month <- factor(ALL_sum$month,
+                          levels = c("april","june","september","december"))
+
+# Plot the sequencing depth
+ggplot(ALL_sum, aes(x=shortcut, y=sum, color=bay, shape=material, size=2))+
+  geom_point()+
+  scale_color_manual(values=c( "mediumblue","orange2"))+
+  geom_hline(yintercept=1000, linetype="dashed", # Include a horizontal line at 1000
+                color = "red", size=1)+
+  facet_wrap(~month, ncol=4)+
+  ggtitle("Sequencing depth")
+
+# we can see that 2 samples are under 1000 counts per sample, and will be excluded for further analysis.
+```
+
+```{r single and doubletons}
+# Prepare table for check on rare taxa, and how they possible influence the diversity
+# Wide format with sequence as rows and samples as columns, to sum up each sequence, how often it appears in the samples
+
+# BW
+Wide_BW <- BW %>%
+  dplyr::select(sequence, sample, count) %>% 
+  spread(sample,count, fill= 0)
+# SED
+Wide_SED <- SED %>% 
+  dplyr::select(sequence, sample, count) %>% 
+  spread(sample,count, fill= 0)
+
+#Remove singletons and doubletons within count data
+
+# BW
+data_cleaned_BW = Wide_BW[rowSums(Wide_BW>0)>2,,drop=FALSE] # Dataset without single and doubletons
+
+data_single_double_BW = Wide_BW[!rowSums(Wide_BW>0)>2,,drop=FALSE] # Only single and doubletons
+
+# SED
+data_cleaned_SED = Wide_SED[rowSums(Wide_SED>0)>2,,drop=FALSE]
+
+data_single_double_SED = Wide_SED[!rowSums(Wide_SED>0)>2,,drop=FALSE]
+```
+
+```{r rarefaction curve - Supplemental Fig. S1}
+
+# Make a rarefaction curve on the raw counts 
+col <- c ("blue", "orange2") # color for the groups
+grp <- factor(meta$bay, levels= c("control","temp_affect")) # groups to color
+cols <- col[grp]
+
+# rareying to the smallest sample size
+(raremax <- min(rowSums(countsRAW)))
+
+# Make rarefaction plot
+out <-  rarecurve(countsRAW, step = 20, sample = raremax, col = cols , cex = 0.6)
+```
+
+```{r Alpha Diversity - with rarefied data - Supplemental Fig. S1}
+# Check on Alpha diversity (here Shannon´s H), with rarefied samples
+
+# Sequencing depth
+rowdepth <- rowSums(countsRAW)
+
+#Rarefy community data
+raremin <- min(rowSums(countsRAW)) 
+
+M = as.matrix(t(countsRAW))
+densityOfSample1 = density(M[,1])
+hist(M[,1], nclass = 50)
+S_densities = apply(M,2,density)
+
+#Rarefried table
+M2 = t(rrarefy(t(M),sample=raremin))
+
+#Check sum
+colSums(M2)#All same sum
+
+# Shannon´s H Diversity
+rarefyshannon<- M2 %>%
+                t()%>%
+                data.frame()%>% 
+                rownames_to_column(var="sample")%>% 
+                plyr::ddply(~sample, function(x) {vegan::diversity(x[-1], index="shannon")}) %>% #Shannon 
+                left_join(meta, by="sample")
+
+# rearrange order of sampling month
+rarefyshannon$month<-factor(rarefyshannon$month, levels = c("september","december","april","june"))
+
+# plot  
+rareshan<- rarefyshannon %>%
+  ggplot(aes(x = bay, y = V1, color=bay)) + 
+  geom_boxplot(aes(color=bay)) +
+  scale_color_manual(values=c("blue","orange"))+
+  labs(x = "", y = "SED Shannon Index - rarefied samples") +
+  theme_bw() +
+  facet_wrap(~material+month, nrow=1)+
+  theme(text = element_text(size = 14)) +
+  theme(panel.grid = element_blank(), axis.title.x = element_text(size = 12))+
+   theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+  )
+
+rareshan
+
+
+```
+
+```{r Alpha Diversity based on SRS - Fig. 3}
+#BW
+#raw counts from both material BW and SED
+example_input_data_BW <- ALL %>%
+  filter(material=="BW")%>%
+  filter(!sample=="X2061")%>%  # take out the one < 1000
+  dplyr::select(sequence, sample, count)%>%  
+  spread(sample,count, fill= 0) %>% 
+  remove_rownames() %>% 
+  column_to_rownames(var = "sequence")
+
+#(e.g. species counts of the library with the lowest sequencing depth):
+Cmin_BW <- min(colSums(example_input_data_BW))
+Cmin_BW
+
+# SRS 
+SRS_output_BW <- SRS(data = example_input_data_BW, Cmin = Cmin_BW)
+SRS_output_BW
+
+
+#SED
+
+#raw counts from both material BW and SED
+example_input_data_SED <- ALL %>%
+  filter(material=="SED")%>%
+  filter(!sample=="X51")%>%   # take out the one < 1000
+  dplyr::select(sequence, sample, count)%>% 
+  spread(sample,count, fill= 0) %>%
+  remove_rownames() %>% 
+  column_to_rownames(var = "sequence")
+
+#(e.g. species counts of the library with the lowest sequencing depth):
+Cmin_SED <- min(colSums(example_input_data_SED))
+Cmin_SED
+
+SRS_output_SED <- SRS(data = example_input_data_SED, Cmin = Cmin_SED)
+SRS_output_SED
+
+
+#Diversity Index Shannon calculation
+
+#BW
+SRSshannon_BW<- SRS_output_BW %>%
+  t()%>%
+  data.frame()%>% 
+  rownames_to_column(var="sample")%>% 
+  plyr::ddply(~sample, function(x) {vegan::diversity(x[-1], index="shannon")}) %>%
+  dplyr::rename(shannon= V1) %>% #Shannon 
+  left_join(meta, by="sample")
+
+SRSshannon_BW$month<-factor(SRSshannon_BW$month, levels = c("september","december","april","june"))
+
+shanSRS_BW <- SRSshannon_BW %>%
+  ggplot(aes(x = bay, y = shannon)) + 
+  geom_boxplot(col=c("blue","orange","blue","orange","blue","orange","blue","orange")) +
+  labs(x = "", y = "Shannon Index") +
+  theme_bw() +
+  theme(text = element_text(size = 14)) +
+  theme(panel.grid = element_blank(), axis.title.x = element_text(size = 12))+
+  facet_wrap(~month, ncol=4)
+
+shanSRS_BW
+
+
+#SED
+SRSshannon_SED<- SRS_output_SED %>%
+  t()%>%
+  data.frame()%>% 
+  rownames_to_column(var="sample")%>% 
+  plyr::ddply(~sample, function(x) {vegan::diversity(x[-1], index="shannon")}) %>%
+  dplyr::rename(shannon= V1) %>% #Shannon 
+  left_join(meta, by="sample")
+
+SRSshannon_SED$month<-factor(SRSshannon_SED$month, levels = c("september","december","april","june"))
+
+shanSRS_SED <- SRSshannon_SED %>%
+  ggplot(aes(x = bay, y = shannon)) + 
+  geom_boxplot(col=c("blue","orange","blue","orange","blue","orange","blue","orange")) +
+  labs(x = "", y = "Shannon Index") +
+  theme_bw() +
+  theme(text = element_text(size = 14)) +
+  theme(panel.grid = element_blank(), axis.title.x = element_text(size = 12))+
+  facet_wrap(~month, ncol=4)
+
+
+shanSRS_SED
+
+
+#Combine both figures
+
+ggarrange(shanSRS_BW,shanSRS_SED, ncol=1, nrow=2)
+
+```
+
+```{r Alpha Diversity - without single & doubltons - Supplemental Fig. S}
+# SRS based on Cleaned data without single and doubletons
+
+#BW
+example_input_data_BW_cl <- data_cleaned_BW %>%
+                            remove_rownames() %>% 
+                             column_to_rownames(var = "sequence")
+
+#(e.g. species counts of the library with the lowest sequencing depth):
+Cmin_BW_cl <- min(colSums(example_input_data_BW_cl))
+Cmin_BW_cl
+
+SRS_output_BW_cl <- SRS(data = example_input_data_BW_cl, Cmin = Cmin_BW_cl)
+SRS_output_BW_cl
+
+#SED
+example_input_data_SED_cl <- data_cleaned_SED %>%
+                            remove_rownames() %>% 
+                             column_to_rownames(var = "sequence")
+
+#(e.g. species counts of the library with the lowest sequencing depth):
+Cmin_SED_cl <- min(colSums(example_input_data_SED_cl))
+Cmin_SED_cl
+
+SRS_output_SED_cl <- SRS(data = example_input_data_SED_cl, Cmin = Cmin_SED_cl)
+SRS_output_SED_cl
+
+
+#Diversity Index Shannon calculation
+
+# Cleaned BW without single and doubletons
+SRSshannon_BW_cl<- SRS_output_BW_cl %>%
+  t()%>%
+  data.frame()%>% 
+  rownames_to_column(var="sample")%>% 
+  plyr::ddply(~sample, function(x) {vegan::diversity(x[-1], index="shannon")}) %>%
+  dplyr::rename(shannon= V1) %>% #Shannon 
+  left_join(meta, by="sample")
+
+SRSshannon_BW_cl$month<-factor(SRSshannon_BW_cl$month, levels = c("september","december","april","june"))
+
+shanSRS_BW_cl <- SRSshannon_BW_cl %>%
+  ggplot(aes(x = bay, y = shannon)) + 
+  geom_boxplot(col=c("blue","orange","blue","orange","blue","orange","blue","orange")) +
+  labs(x = "", y = "Shannon Index") +
+  theme_bw() +
+  theme(text = element_text(size = 14)) +
+  theme(panel.grid = element_blank(), axis.title.x = element_text(size = 12))+
+  facet_wrap(~month, ncol=4)
+
+shanSRS_BW_cl
+
+# Cleaned SED without single and doubletons
+SRSshannon_SED_cl<- SRS_output_SED_cl %>%
+  t()%>%
+  data.frame()%>% 
+  rownames_to_column(var="sample")%>% 
+  plyr::ddply(~sample, function(x) {vegan::diversity(x[-1], index="shannon")}) %>%
+  dplyr::rename(shannon= V1) %>% #Shannon 
+  left_join(meta, by="sample")
+
+SRSshannon_SED_cl$month<-factor(SRSshannon_SED_cl$month, levels = c("september","december","april","june"))
+
+shanSRS_SED_cl <- SRSshannon_SED_cl %>%
+  ggplot(aes(x = bay, y = shannon)) + 
+  geom_boxplot(col=c("blue","orange","blue","orange","blue","orange","blue","orange")) +
+  labs(x = "", y = "Shannon Index") +
+  theme_bw() +
+  theme(text = element_text(size = 14)) +
+  theme(panel.grid = element_blank(), axis.title.x = element_text(size = 12))+
+  facet_wrap(~month, ncol=4)
+
+shanSRS_SED_cl
+
+
+###Overview of cleaned data combined
+
+ggarrange(shanSRS_BW_cl,shanSRS_SED_cl, ncol=2)
+
+```
+
+```{r Alpha Diversity - Shannon evenness - Fig. 3}
+# Use all samples with SRS calculations
+# BW
+
+B_BW <- SRS_output_BW %>%
+        t()%>%
+        data.frame()%>% 
+        rownames_to_column(var="sample")%>%
+        remove_rownames()%>%
+        column_to_rownames(var="sample")
+H_BW <- SRS_output_BW %>%
+      t()%>%
+      data.frame()%>% 
+      rownames_to_column(var="sample")%>% 
+      plyr::ddply(~sample, function(x) {vegan::diversity(x[-1], index="shannon")}) %>%
+      dplyr::rename(shannon= V1)
+H_BW <- H_BW %>% 
+    remove_rownames()%>% 
+    column_to_rownames(var="sample")
+
+J_BW <- H_BW/log(specnumber(B_BW))
+
+evenSH_BW <- J_BW %>% 
+  rownames_to_column(var="sample")%>%
+  left_join(meta, by="sample")
+
+# rearrange the sampling month
+
+evenSH_BW$month<-factor(evenSH_BW$month, levels = c("september","december","april","june"))
+
+# plot 
+
+ggshaneven_BW<- evenSH_BW %>%
+  ggplot(aes(x = bay, y = shannon)) + 
+    geom_boxplot(col=c("blue","orange","blue","orange","blue","orange","blue","orange")) +
+  labs(x = "", y = "BW Shannon evenness") +
+  theme_bw() +
+  theme(text = element_text(size = 14)) +
+  theme(panel.grid = element_blank(), axis.title.x = element_text(size = 12))+
+  facet_wrap(~month, ncol=4)
+
+ggshaneven_BW
+
+# SED
+B_SED <- SRS_output_SED %>%
+        t()%>%
+        data.frame()%>% 
+        rownames_to_column(var="sample")%>%
+        remove_rownames()%>%
+        column_to_rownames(var="sample")
+H_SED <- SRS_output_SED %>%
+      t()%>%
+      data.frame()%>% 
+      rownames_to_column(var="sample")%>% 
+      plyr::ddply(~sample, function(x) {vegan::diversity(x[-1], index="shannon")}) %>%
+      dplyr::rename(shannon= V1)
+H_SED <- H_SED %>% 
+    remove_rownames()%>% 
+    column_to_rownames(var="sample")
+
+J_SED <- H_SED/log(specnumber(B_SED))
+
+evenSH_SED <- J_SED %>% 
+  rownames_to_column(var="sample")%>%
+  left_join(meta, by="sample")
+
+# rearrange the sampling month
+evenSH_SED$month<-factor(evenSH_SED$month, levels = c("september","december","april","june"))
+
+# plot 
+ggshaneven_SED<- evenSH_SED %>%
+  ggplot(aes(x = bay, y = shannon)) + 
+    geom_boxplot(col=c("blue","orange","blue","orange","blue","orange","blue","orange")) +
+  labs(x = "", y = "SED Shannon evenness") +
+  theme_bw() +
+  theme(text = element_text(size = 14)) +
+  theme(panel.grid = element_blank(), axis.title.x = element_text(size = 12))+
+  facet_wrap(~month, ncol=4)
+
+ggshaneven_SED
+
+
+
+#combine Shannon´s and Evenness figures to one
+
+ggarrange(shanSRS_BW,ggshaneven_BW,shanSRS_SED,ggshaneven_SED,ncol=2,nrow=2)
+```
+
+```{r Linear mixed model tesing for Alpha Diversity - Supplemental Table S3}
+# Either BW or SED table
+# Either testing shannon or evenness ( used for both )
+# bay * month are interaction and fixed variables
+# replicate is nested in site, which both are random variables
+
+B2 <- lme(shannon ~ 1 + bay * month, data=SRSshannon_SED, random=~1|site/replicate, method="REML")
+
+anova(B2)
+
+# Pairwise comparison to check for differences between bays at each sampling month
+emmeans(B2, spec="bay",by="month", contr="pairwise")
+
+
+#Mean + SD Bay Calculations 
+# Either for BW or SED
+# Either Shannon or evenness
+meta_bay <- SRSshannon_SED %>% 
+  group_by(bay)%>% 
+  dplyr::summarize(mean.shannon= mean(shannon ,na.rm=TRUE)) %>% 
+  ungroup()
+
+meta_sites <- SRSshannon_SED %>% 
+  group_by( bay)%>% 
+  dplyr::summarize(sd.sites= sd(shannon, na.rm=TRUE)) %>%  
+  ungroup() 
+```
+
+```{r Preparation of tables for Community + Env.Var analysis}
+# BW
+
+metasubBW<- meta %>% 
+  filter(material =="BW")%>% 
+  filter(!sample %in%c("X2061","X2013","X2014","X2015")) # Exclude these sample (Env.Var information missing)
+# Select Env.Var you want to test
+metasubBW <- metasubBW %>%  
+  dplyr::select( sample,  bay, pH,  sulfate, irontot, nitrate.nitrite, phosphate, temperature, site, shortcut,depth, month, oxygen)
+# exclude samples with missing information
+metasubBW<- na.omit(metasubBW)
+
+# Same samples needs to be excluded in the community tables
+BWsub <- BW %>% 
+  filter(!sample %in%c("X1071", "X2013","X2014","X2015"))
+
+# Make filtered table wide format
+BWsubwide <- BWsub %>% 
+  dplyr::select(sequence,sample,relab) %>% 
+  spread(sequence,relab, fill= 0) %>% 
+  remove_rownames() %>% 
+  column_to_rownames(var = "sample")
+
+
+# SED
+
+# Meta table
+metasubSED <- meta %>% 
+              filter(material =="SED")
+
+metasubSED <- metasubSED %>%  
+  dplyr::select(sample,bay, pH,  sulfate, irontot, nitrate, nitrite, phosphate, OM, oxygen, temperature,depth, month, site)
+
+metasubSED <- na.omit(metasubSED)%>%
+              filter(!sample=="X51")
+
+SEDsub <- SED
+SEDsub <- SEDsub %>% 
+  filter(!sample %in%c("X69","X78","X93","X1140","X1141","X1045", "X51")) # Filtered samples
+
+# Wide format
+SEDsubwide <- SEDsub %>% 
+  dplyr::select(sequence,sample,relab) %>% 
+  spread(sequence,relab, fill= 0) %>% 
+  remove_rownames() %>% 
+  column_to_rownames(var = "sample")
+```
+
+```{r PERMANOVA - Test differences between communities of both bays - BW and SED - Supplemental Table S3}
+# Differences of microbial communities based on bay
+
+# BW
+BC.dist=vegdist(relab_filt_BW, distance="bray")
+
+# meta BW
+BWmeta <- meta %>% filter(material %in% "BW")%>%
+  filter(!sample %in% "X2061")
+  
+
+adonis(BC.dist ~bay*month, strata= BWmeta$site, data=BWmeta, permutations=999)
+
+
+# SED
+BC.dist=vegdist(relab_filt_SED, distance="bray")
+
+# meta SED
+SEDmeta <- meta %>% 
+  filter(material %in% "SED")%>%
+  filter(!sample %in% "X51")
+  
+
+adonis(BC.dist ~bay*month, strata= SEDmeta$site, data=SEDmeta, permutations=999)
+```
+
+```{r db-RDA, constrained ordination, based on distance - Fig. 5 }
+# distance based redundancy analysis 
+
+#BW
+# bray curtis distances
+BC.dist=vegdist(BWsubwide, distance="bray")
+
+# dbRDA with capscale
+dbRDA=capscale(BC.dist~ pH +  sulfate + irontot + nitrate.nitrite + phosphate + temperature +  oxygen +depth, data=metasubBW, dist="bray")
+
+dbRDA
+
+# Variance inflation factor - check for multiconneality 
+vifBW<- vif.cca(dbRDA)
+vifBW
+
+# anova like permuation test for significance of the axis and the environmental variables, what does singificantly explain differences between the communitities
+anova(dbRDA, by="axis", perm.max=999)# test axes for significance CAP1 ***, CAP2.
+
+# blocks month, so permutation within month
+ctrlm <- how(nperm=999,  blocks=metasubBW$month)
+# block bay, permuation within bays
+ctrlb <- how(nperm=999,  blocks=metasubBW$bay)
+# set a seed
+set.seed(10)
+
+# Use marginal effect in a direct model 
+aoM<- anova(dbRDA, by = "margin",model="direct", permutations = ctrlm)
+aoB<- anova(dbRDA, by = "margin",model="direct", permutations = ctrlb)
+
+# Calculate the % explained by each axis (here axis 1 and 2)
+dpRDA.eigs    <- dbRDA$CCA$eig %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column('dbRDA') %>%
+  rename(eigval = 2) %>%
+  mutate(propexpl = eigval/sum(eigval))
+dpRDA.eigs.uncon    <- dbRDA$CA$eig %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column('dbRDA') %>%
+  rename(eigval = 2) %>%
+  mutate(propexpl = eigval/sum(eigval))
+
+expl_var <- c(dpRDA.eigs , dpRDA.eigs.uncon)
+
+
+# Plot 
+#Extract site data first
+scrs <- scores(dbRDA, display=c("sp","wa","lc","bp","cn"))
+df_sites<-data.frame(scrs$sites,t(as.data.frame(strsplit(rownames(scrs$sites),"_"))))
+colnames(df_sites)<-c("CAP1","CAP2","sample")
+
+df_sites <- df_sites %>% 
+  inner_join(metasubBW, by="sample")
+
+#Draw sites
+p2<-ggplot()
+p2<-p2+geom_point(data=df_sites,aes(CAP1,CAP2,colour=bay,shape=month, size=5))+
+  scale_color_manual(values=c( "mediumblue","orange2"))
+
+#Draw biplots
+multiplier <- vegan:::ordiArrowMul(scrs$biplot*0.3)
+
+df_arrows<- scrs$biplot*multiplier
+colnames(df_arrows)<-c("CAP1","CAP2")
+df_arrows=as.data.frame(df_arrows)
+
+p2<-p2+geom_segment(data=df_arrows, aes(x = 0, y = 0, xend = CAP1, yend = CAP2),
+                 arrow = arrow(length = unit(0.2, "cm")))
+
+p2<-p2+geom_text(data=as.data.frame(df_arrows*1.0),aes(CAP1, CAP2, label = rownames(df_arrows)))+
+  theme_classic()
+p2
+
+
+
+# SED
+
+BC.dist=vegdist(SEDsubwide, distance="bray")
+
+dbRDA=capscale(BC.dist~OM + pH +  sulfate + irontot +nitrate + nitrite + phosphate + temperature +oxygen+depth , data=metasubSED, dist="bray")
+
+##VIF
+vifSED <- vif.cca(dbRDA)
+vifSED
+
+
+aoaxis <-anova(dbRDA, by="axis", perm.max=999)
+
+
+
+ctrl <- how(nperm=999, strata=metasubSED$bay)
+
+set.seed(10)
+ao <- anova(dbRDA, by = "margin",model="direct", permutations = ctrl)
+
+#aostr<- anova(dbRDA, by = "margin",model="direct", permutations = 999, strata=metasubSED$month)
+
+
+
+##Calculate the eigenvalues 
+dpRDA.eigs    <- dbRDA$CCA$eig %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column('dbRDA') %>%
+  rename(eigval = 2) %>%
+  mutate(propexpl = eigval/sum(eigval))
+dpRDA.eigs.uncon    <- dbRDA$CA$eig %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column('dbRDA') %>%
+  rename(eigval = 2) %>%
+  mutate(propexpl = eigval/sum(eigval))
+
+
+expl_var <- c(dpRDA.eigs , dpRDA.eigs.uncon)
+
+
+
+# Plot
+#Extract site data first
+scrs <- scores(dbRDA, display=c("sp","wa","lc","bp","cn"))
+df_sites<-data.frame(scrs$sites,t(as.data.frame(strsplit(rownames(scrs$sites),"_"))))
+colnames(df_sites)<-c("CAP1","CAP2","sample")
+
+df_sites <- df_sites %>% 
+  inner_join(metasubSED, by="sample")
+
+#Draw sites
+p<-ggplot()
+p<-p+geom_point(data=df_sites,aes(CAP1,CAP2,colour=bay,shape=month, size=5))+
+  scale_color_manual(values=c( "mediumblue","orange2"))
+
+#Draw biplots
+multiplier <- vegan:::ordiArrowMul(scrs$biplot*0.3)
+
+df_arrows<- scrs$biplot*multiplier
+colnames(df_arrows)<-c("CAP1","CAP2")
+df_arrows=as.data.frame(df_arrows)
+
+p<-p+geom_segment(data=df_arrows, aes(x = 0, y = 0, xend = CAP1, yend = CAP2),
+                 arrow = arrow(length = unit(0.2, "cm")))
+
+p<-p+geom_text(data=as.data.frame(df_arrows*1.5),aes(CAP1, CAP2, label = rownames(df_arrows)))+
+  theme_classic()
+p
+
+
+# Combined both figures 
+
+ggarrange(p2,p, ncol=2)
+
+
+```
+
+```{r NMDS - Supplemental Fig. S5}
+# We can show here that the constrained and unconstrained ordination do not differ, 
+# and the community differences are solid differences
+
+# BW
+asvs_subbw <-  BW%>% 
+  dplyr::select(sequence,sample,relab) %>% 
+  spread(sequence,relab, fill= 0) %>% 
+  remove_rownames() %>% 
+  column_to_rownames(var = "sample")
+
+# NMDS
+# calculate bray curtis distances with metaMDS function, double check autotransform and trace in metaMDS help!!!
+nmds.asvs.h.bc_bw <- metaMDS(asvs_subbw ,
+                             distance = "bray",
+                             k = 3,
+                             trymax = 50,
+                             autotransform = FALSE, # set to false when using normalized data from relab
+                             trace = FALSE) 
+
+
+nmds.seed.asvs.bc.df_bw <- as.data.frame(nmds.asvs.h.bc_bw$points) %>%
+      rownames_to_column(var ="sample") %>%
+       dplyr::rename(NMDS1 = MDS1, NMDS2 = MDS2)
+ 
+# check the stress plot should be a nearly linear fit
+nmds.asvs.h.bc.stress_bw <- stressplot(nmds.asvs.h.bc_bw)
+
+
+# Plot
+p_bw <- nmds.seed.asvs.bc.df_bw %>% inner_join (BW, by="sample")%>%
+  ungroup()%>%
+  ggplot( aes(x=NMDS1, y=NMDS2, color=site, shape=bay, label=site)) +
+  geom_point(size = 8) +
+  theme_bw() +
+  labs(title = "OKG BW")
+
+p_bw
+
+
+# SED
+asvs_subsed <-  SED%>% 
+  dplyr::select(sequence,sample,relab) %>% 
+  spread(sequence,relab, fill= 0) %>% 
+  remove_rownames() %>% 
+  column_to_rownames(var = "sample")
+
+# NMDS
+nmds.asvs.h.bc <- metaMDS(asvs_subsed ,
+                             distance = "bray",
+                             k = 3,
+                             trymax = 50,
+                             autotransform = FALSE,
+                             trace = FALSE)
+
+
+nmds.seed.asvs.bc.df <- as.data.frame(nmds.asvs.h.bc$points) %>%
+      rownames_to_column(var ="sample") %>%
+       dplyr::rename(NMDS1 = MDS1, NMDS2 = MDS2)
+ 
+# Stress plot
+nmds.asvs.h.bc.stress <- stressplot(nmds.asvs.h.bc)
+
+# Plot
+
+p <- nmds.seed.asvs.bc.df %>% inner_join (SED, by="sample")%>%
+  ungroup()%>%
+  ggplot( aes(x=NMDS1, y=NMDS2, color=site, shape=bay, label=site)) +
+  geom_point(size = 8) +
+  theme_bw() +
+  labs(title = "OKG  SED")
+
+p
+
+# combined the figures
+ggarrange(p, p_bw, ncol=2)
+
+```
+
+```{r Phylum Level - bar plot - Supplemental Fig. S6}
+# BW
+
+# rearrange the sampling month
+ BW$month <- factor(BW$month,levels=c("september","december","april","june"))
+# Plot
+BW%>%
+  mutate_if(is.character, list(~na_if(.,"")))%>% # NA for missing information
+  replace_na(list(Kingdom="xx_Unclassified"))%>% # exchange NA with Unclassified
+  filter(!Kingdom %in% "xx_Unclassified")%>% # Filter possible Unclassified sequences
+  filter(relab >= 0.005)%>% # Filter ASVs (sequences) with a relative abundance <0.5 % per sample
+ggplot(aes(x = shortcut, y = relab, fill = Phylum)) +
+geom_bar(position="fill", stat="identity") +
+coord_flip() +
+scale_fill_manual(values=c("#a40027","#ff585a","#ff8e44","#503e00","#7d8a00","#4edb13","#acff90","#006a04","#5fffcc","#018afd","#014bea","#210055","#b53aed","#ff98ff","#ff2dc6","#ffdbee","#ae006a"))+
+theme(
+    legend.position = 'bottom'
+)+
+  xlab('bay') + ylab('relative abundance ') +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+)+
+  facet_grid(~bay+month)
+
+# SED
+
+ SED$month <- factor(SED$month,levels=c("september","december","april","june"))
+ 
+SED%>%
+  mutate_if(is.character, list(~na_if(.,"")))%>%
+  replace_na(list(Kingdom="xx_Unclassified"))%>%
+  filter(!Kingdom %in% "xx_Unclassified")%>%
+  filter(relab >= 0.005)%>%
+ggplot(aes(x = shortcut, y = relab, fill = Phylum)) +
+geom_bar(position="fill", stat="identity") +
+coord_flip() +
+scale_fill_manual(values=c("#a40027","#ff585a","#ff8e44","#ffb330","#bf9700","#503e00","#7d8a00","#4edb13","#acff90","#006a04","#00452f","#5fffcc","#001915","#01c2b7","#00a3d5","#018afd","#012a71","#b4b3ff","#014bea","#210055","#b53aed","#ff98ff","#ff2dc6","#ffdbee","#ae006a"))+
+theme(
+    legend.position = 'bottom'
+)+
+  xlab('bay') + ylab('relative abundance') +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+)+
+  facet_grid(~bay+month)
+```
+
+```{r Differential abundance analysis - DESeq2 - BW}
+# Make an phyloseq object
+OTU <- BW%>%
+  filter(!sample %in% "X2061")%>%
+  group_by(sequence, sample)%>%
+  summarise(count=sum(count))%>%
+  dplyr::select(sequence, sample, count)%>% 
+  spread(sample, count,fill=0 ) %>%
+  column_to_rownames("sequence")
+
+TAXA <- taxa %>% 
+  semi_join(BW, by=c("sequence","Kingdom","Family","Order","Class","Genus","Species"))%>% 
+  remove_rownames()%>%
+  column_to_rownames(var="sequence")
+
+SAMPLES <- meta %>%
+          filter(material %in% "BW")%>%
+          filter(!sample %in% ("X2061"))%>%
+          remove_rownames() %>% 
+          column_to_rownames(var="sample")
+
+OTU <- as.matrix(OTU)
+TAXA <- as.matrix(TAXA)
+
+  OTU = otu_table(OTU, taxa_are_rows = TRUE)
+  TAX = tax_table(TAXA)
+  samples = sample_data(SAMPLES)
+  
+  carbom <- phyloseq(OTU, TAX, samples)
+  carbom
+
+# Get rid of low abundant Taxa
+species_counts_df <- data.frame(otu_table(carbom))
+(sum(colSums(species_counts_df == 0))) / (nrow(species_counts_df) * ncol(species_counts_df))
+
+# ~ 93 % zeros in our matrix, now we are droping taxa not seen in at least 50 % of the samples, 476 taxa left
+(carbom <- filter_taxa(carbom, function(x) sum(x > 0) > (0.5*length(x)), TRUE))
+
+# Assessing zero proportion after filtering
+species_counts_df <- data.frame(otu_table(carbom))
+species_counts_df <- data.frame(t(species_counts_df))
+
+
+dds_zinbwave <- phyloseq_to_deseq2(carbom, ~ bay*month + site:replicate)
+ds_zinbwave <- zinbwave(dds_zinbwave,
+                   X="~ 1",
+                   epsilon = 1e10,
+                   verbose = TRUE,
+                   K = 0,
+                   observationalWeights = TRUE,
+                   BPPARAM = BiocParallel::SerialParam())
+
+
+dds_zinb <- DESeqDataSet(dds_zinbwave, design = ~ bay+month+site:replicate)
+   dds_zinb$group <- factor(paste0(dds_zinb$bay, dds_zinb$month))
+   design(dds_zinb)<- ~group
+dds_zinb <- estimateSizeFactors(dds_zinb, type="poscounts")
+scr <- computeSumFactors(dds_zinb) 
+
+sizeFactors(dds_zinb) <- sizeFactors(scr)
+
+
+# Fit the model use the LRT 
+dds_zinb <- DESeq(dds_zinb, test="LRT", reduced=~1, sfType="poscounts",
+                  minmu=1e-6, minReplicatesForReplace=Inf, fitType = "local")
+
+plotMA(dds_zinb)
+plotDispEsts(dds_zinb)  
+
+# Make contrast so you can differentiate between the groups you are looking for
+   resultsNames(dds_zinb)
+   septDE2 <- results(dds_zinb, contrast=c("group","controlseptember","temp_affectseptember")) 
+   decDE2 <-results(dds_zinb, contrast=c("group","controldecember","temp_affectdecember")) 
+   aprilDE2 <-results(dds_zinb, contrast=c("group","controlapril","temp_affectapril"))
+   juneDE2 <-results(dds_zinb, contrast=c("group","controljune","temp_affectjune"))
+
+##make it readable  
+    shallDE2_results <- data.frame(juneDE2)
+    baseMeanPerLvl <- sapply( levels(dds_zinb$group),
+                              function(lvl) rowMeans(counts(dds_zinb,normalized=TRUE)[,dds_zinb$group == lvl] ) )
+    shallDE2_results <-merge(shallDE2_results,baseMeanPerLvl, by="row.names")
+    shallDE2_results<- shallDE2_results[,c(1,2,10,14,3,4,5,6,7)]
+
+    sorted_deepDE2_results <- shallDE2_results[order(-shallDE2_results$baseMean),]
+    colnames(sorted_deepDE2_results)[1] <- "sequence"
+   
+    sorted_taxa <- sorted_deepDE2_results %>% left_join(taxa, by="sequence")
+   
+    #write.csv(sorted_taxa , "../../xx.csv")
+```
+
+```{r Differential abundance analysis - DESeq2 - SED}
+# Using Zero-Inflated Negative Binominal Model to reduce excess of Zeros in Data Set before using DESeq for Differential Abundance analysis
+
+# Make an phyloseq object
+OTU <- SED%>%
+  filter(!sample %in% "X51")%>%
+  group_by(sequence, sample)%>%
+  summarise(count=sum(count))%>%
+  dplyr::select(sequence, sample, count)%>% 
+  spread(sample, count,fill=0 ) %>%
+  column_to_rownames("sequence")
+
+TAXA <- taxa %>% 
+  semi_join(SED, by=c("sequence","Kingdom","Family","Order","Class","Genus","Species"))%>% 
+  remove_rownames()%>%
+  column_to_rownames(var="sequence")
+
+SAMPLES <- meta %>%
+          filter(material %in% "SED")%>%
+          filter(!sample %in% ("X51"))%>%
+          remove_rownames() %>% 
+          column_to_rownames(var="sample")
+
+OTU <- as.matrix(OTU)
+TAXA <- as.matrix(TAXA)
+
+  OTU = otu_table(OTU, taxa_are_rows = TRUE)
+  TAX = tax_table(TAXA)
+  samples = sample_data(SAMPLES)
+  
+  carbom <- phyloseq(OTU, TAX, samples)
+  carbom #Phyloseq object
+
+# Get rid of low abundant Taxa
+species_counts_df <- data.frame(otu_table(carbom))
+(sum(colSums(species_counts_df == 0))) / (nrow(species_counts_df) * ncol(species_counts_df))#95 % zeros in our matrix
+
+# ~ 95 % zeros in our matrix, now we are droping taxa not seen in at least 50 % of the samples
+(carbom <- filter_taxa(carbom, function(x) sum(x > 0) > (0.5*length(x)), TRUE))
+
+# Assessing zero proportion after filtering
+species_counts_df <- data.frame(otu_table(carbom))
+species_counts_df <- data.frame(t(species_counts_df))
+
+
+dds_zinbwave <- phyloseq_to_deseq2(carbom, ~ bay*month + site:replicate)
+ds_zinbwave <- zinbwave(dds_zinbwave,
+                   X="~ 1",
+                   epsilon = 1e10,
+                   verbose = TRUE,
+                   K = 0,
+                   observationalWeights = TRUE,
+                   BPPARAM = BiocParallel::SerialParam())
+
+
+dds_zinb <- DESeqDataSet(dds_zinbwave, design = ~ bay+month+site:replicate) # Model used
+   dds_zinb$group <- factor(paste0(dds_zinb$bay, dds_zinb$month)) # month and bay as grouping to use for contrast later
+   design(dds_zinb)<- ~group
+dds_zinb <- estimateSizeFactors(dds_zinb, type="poscounts")
+scr <- computeSumFactors(dds_zinb) 
+
+sizeFactors(dds_zinb) <- sizeFactors(scr)
+
+
+# Fit the model use the LRT 
+dds_zinb <- DESeq(dds_zinb, test="LRT", reduced=~1, sfType="poscounts",
+                  minmu=1e-6, minReplicatesForReplace=Inf, fitType = "local")
+
+plotMA(dds_zinb)
+plotDispEsts(dds_zinb)  
+
+# Make contrast so you can differentiate between the groups you are looking for
+   resultsNames(dds_zinb)
+   septDE2 <- results(dds_zinb, contrast=c("group","controlseptember","temp_affectseptember")) 
+   decDE2 <-results(dds_zinb, contrast=c("group","controldecember","temp_affectdecember")) 
+   aprilDE2 <-results(dds_zinb, contrast=c("group","controlapril","temp_affectapril"))
+   juneDE2 <-results(dds_zinb, contrast=c("group","controljune","temp_affectjune"))
+
+# make it readable  
+    shallDE2_results <- data.frame(juneDE2)
+    baseMeanPerLvl <- sapply( levels(dds_zinb$group), function(lvl) rowMeans(counts(dds_zinb,normalized=TRUE)[,dds_zinb$group == lvl] ) )
+    shallDE2_results <-merge(shallDE2_results,baseMeanPerLvl, by="row.names")
+    shallDE2_results<- shallDE2_results[,c(1,2,10,14,3,4,5,6,7)]
+
+    sorted_deepDE2_results <- shallDE2_results[order(-shallDE2_results$baseMean),]
+    colnames(sorted_deepDE2_results)[1] <- "sequence"
+   
+    sorted_taxa <- sorted_deepDE2_results %>% left_join(taxa, by="sequence")
+   
+   # write.csv(sorted_taxa , "../../xx.csv")
+```
+
+```{r Differential abundance analysis - BW - Fig. 4 + Fig. 6}
+# Order Level
+# April
+aprildif <- read.csv("../../Time_series_all/Paper/Figures_analysis/Results_June2021/Deseq_differential_abundance_april_BIGTS_BW_ASV_level_zero_inflated_count_model_filtered_50percent.csv", stringsAsFactors = FALSE)
+
+aprilfilt <- aprildif %>% filter(padj <0.05) %>% 
+               dplyr::select(-controlapril,-temp_affectapril)
+aprilrest <- aprildif %>%anti_join(aprilfilt, by="sequence") %>% mutate(Order = "zzzz_not_significant")%>%
+                      dplyr::select(-controlapril,-temp_affectapril)
+
+
+abundapril<- rbind(aprilfilt,aprilrest)
+
+asvapril <- BW%>% filter(month%in% "april")
+
+aprilfull <- abundapril %>% 
+            left_join(asvapril, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+            filter(month%in%"april")
+
+# June
+Junedif <- read.csv("../../Time_series_all/Paper/Figures_analysis/Results_June2021/Deseq_differential_abundance_june_BIGTS_BW_ASV_level_zero_inflated_count_model_filtered_50percent.csv", stringsAsFactors = FALSE)
+
+Junefilt <- Junedif %>% filter(padj <0.05) %>%
+               dplyr::select(-controljune,-temp_affectjune)
+Junerest <- Junedif %>%anti_join(Junefilt, by="sequence") %>% mutate(Order = "zzzz_not_significant")%>%
+               dplyr::select(-controljune,-temp_affectjune)
+
+
+abundJune<- rbind(Junefilt,Junerest)
+
+asvJune <- BW %>% filter(month%in% "june")
+
+Junefull <- abundJune %>% 
+            left_join(asvJune, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+            filter(month%in%"june")
+
+# December
+decdif <- read.csv("../../Time_series_all/Paper/Figures_analysis/Results_June2021/Deseq_differential_abundance_december_BIGTS_BW_ASV_level_zero_inflated_count_model_filtered_50percent.csv", stringsAsFactors = FALSE)
+
+decfilt <- decdif %>% filter(padj <0.05) %>% 
+               dplyr::select(-controldecember,-temp_affectdecember)
+decrest <- decdif %>%anti_join(decfilt, by="sequence") %>% mutate(Order = "zzzz_not_significant")%>%
+               dplyr::select(-controldecember,-temp_affectdecember)
+
+
+abunddec<- rbind(decfilt,decrest)
+
+asvdec <- BW %>% filter(month%in% "december")
+
+decfull <- abunddec %>% 
+            left_join(asvdec, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+            filter(month%in%"december")
+
+# September
+septdif <- read.csv("../../Time_series_all/Paper/Figures_analysis/Results_June2021/Deseq_differential_abundance_september_BIGTS_BW_ASV_level_zero_inflated_count_model_filtered_50percent.csv", stringsAsFactors = FALSE)
+
+septfilt <- septdif %>% filter(padj <0.05) %>%
+               dplyr::select(-controlseptember,-temp_affectseptember)
+septrest <- septdif %>%anti_join(septfilt, by="sequence") %>% mutate(Order = "zzzz_not_significant")%>%
+               dplyr::select(-controlseptember,-temp_affectseptember)
+
+
+abundsept<- rbind(septfilt,septrest)
+
+asvsept <- BW %>% filter(month%in% "september")
+
+septfull <- abundsept %>% 
+            left_join(asvsept, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+            filter(month%in%"september")
+
+# combine all
+
+abund.all <- rbind(aprilfull, Junefull, decfull, septfull)
+
+
+# not significant
+april.not.sig <- aprilrest%>% 
+              left_join(asvapril, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+               filter(month%in%"april")
+june.not.sig <- Junerest%>% 
+              left_join(asvJune, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+               filter(month%in%"june")
+dec.not.sig <- decrest%>% 
+              left_join(asvdec, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+               filter(month%in%"december")
+sept.not.sig <- septrest%>% 
+              left_join(asvsept, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+               filter(month%in%"september")
+
+abund.all.rest <- rbind(april.not.sig, june.not.sig, dec.not.sig, sept.not.sig)
+
+# getting 1 % and others
+
+abund.all0.5 <- abund.all%>% 
+  group_by(Order.x,shortcut,bay,month,sample)%>%
+  summarise(relab=sum(relab))%>%
+  summarise(relab=mean(relab))%>%
+  filter(relab >0.01) 
+
+abund.allrest <- abund.all %>% anti_join(abund.all0.5, by="sequence") %>% mutate(Order.x = "zzz_Others")
+
+# combined with others under 1 percent and significant over 1 percent
+
+abund.all.combined <- rbind(abund.all0.5, abund.allrest)
+
+
+# Want to get all non significant in one group and then others significant < 1 % together
+
+# signifcant within others group
+sig.others <- abund.allrest %>% anti_join(abund.all.rest, by="sequence")
+# not significant ones within others group
+non.sig.others <- abund.all.rest %>% anti_join(sig.others, by="sequence")%>%mutate(Order.x ="zzzz_not_significant")
+
+# combine both tables above with the tables over 1 % 
+
+all.combined.final <- rbind(abund.all0.5,sig.others,non.sig.others) # final table
+
+# using Order.x
+
+all.combined.final$month<-factor(all.combined.final$month, levels = c("september","december","april","june"))
+
+all.combined.final %>%
+ggplot(aes(x = shortcut, y = relab, fill =Order.x)) +
+geom_bar( position="fill", stat="identity") +
+coord_flip() +
+theme(
+    legend.position = 'bottom'
+  )+
+  xlab('bay') + ylab('relative abundance >1%') +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+  )+
+ scale_fill_manual(values=c("#d97d97","#da3e5d","#842d2e","#462a24","#e04125","#bd5338","#cb8f7a","#e47e3a","#7b5733","#cd9740",
+"#d3c6a0","#dbd049","#858737","#a9db47","#b4da90","#4e903f","#334e2c","#61d855","#5bd89d","#5f8b7a","#87d8d0","#69a5c9","#2c3a51",
+"#667acb","#6e45cd","#452a79","#cdb5d6","#c37dd1","#876985","#c946c9","#522044","#963271","#df4496"))+
+  facet_grid(~bay+month)+
+  theme(legend.position="bottom")
+
+
+# Only signficant
+
+only.sig <- all.combined.final %>% filter(!Order.x %in% c("zzzz_not_significant","zz_Unclassified"))
+only.sig$month<-factor(only.sig$month,  levels = c("september","december","april","june"))
+only.sig%>%
+ggplot(aes(x = shortcut, y = relab, fill =Order.x)) +
+geom_bar( position="fill", stat="identity") +
+coord_flip() +
+    scale_fill_manual(values=c("#d97d97","#da3e5d","#842d2e","#462a24","#e04125","#bd5338","#cb8f7a","#e47e3a","#7b5733",
+                               "#cd9740","#d3c6a0","#dbd049","#858737","#a9db47","#b4da90","#4e903f","#334e2c","#61d855",
+                               "#5bd89d","#5f8b7a","#87d8d0","#69a5c9","#2c3a51","#667acb","#6e45cd","#452a79","#cdb5d6",
+                               "#c37dd1","#876985","#c946c9","#522044","#963271","#df4496"))+
+
+theme(
+    legend.position = 'bottom'
+  )+
+  xlab('bay') + ylab('relative abundance >1%') +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+  )+
+  facet_grid(~bay+month)+
+  theme(legend.position="bottom")
+
+
+# Genus level on specific Order taxa
+
+# Prepare table for the Fig. on Genus level 
+abund.all_all <- abund.all
+abund.allrest_ASV <- abund.all %>% 
+  anti_join(abund.all_all, by="Order.x") %>% 
+  mutate(Order.x = "zzz_Others")
+sig.others_ASV <- abund.allrest_ASV %>% 
+  anti_join(abund.all.rest, by="sequence")
+non.sig.others_ASV <- abund.all.rest %>% 
+  anti_join(sig.others_ASV, by="sequence")%>%
+  mutate(Order.x ="zzzz_not_significant")
+all.combined.final.ASV <- rbind(abund.all_all,sig.others_ASV,non.sig.others_ASV)
+
+# Figure of specific Order over 1 % relative abundance
+
+all.combined.final.ASV %>%
+  filter(Order.x %in% c("Betaproteobacteriales","Flavobacteriales","Microtrichales","Nanopelagicales","Synechococcales_A"))%>%
+  group_by(Genus,shortcut,bay,month,sample)%>%
+  summarise(relab=sum(relab))%>%
+  summarise(relab=mean(relab))%>%
+  filter(relab > 0.01)%>%
+  ggplot(aes(x = shortcut, y = relab, fill =Genus)) +
+geom_bar( position="fill", stat="identity") +
+coord_flip() +
+theme(
+    legend.position = 'bottom'
+  )+
+  xlab('bay') + ylab('relative abundance >1%') +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+  )+
+ scale_fill_manual(values=c("#d97d97","#da3e5d","#842d2e","#462a24","red","#bd5338","#cb8f7a","#e47e3a",
+                            "#7b5733","#cd9740","#d3c6a0","#dbd049","#858737","#a9db47","#b4da90","#4e903f",
+                            "#334e2c","#5bd89d","#5f8b7a","grey76"
+))+
+  facet_grid(~bay+month)+
+  theme(legend.position="bottom")
+```
+
+```{r Differential abundance analysis - SED - Fig. 4 & Fig. 6}
+# Order Level
+# April
+aprildif <- read.csv("../../Time_series_all/Paper/Figures_analysis/Results_June2021/Deseq_differential_abundance_april_BIGTS_SED_ASV_level_zero_inflated_count_model_filtered_50percent.csv", stringsAsFactors = FALSE)
+
+aprilfilt <- aprildif %>% filter(padj <0.05) %>% 
+               dplyr::select(-controlapril,-temp_affectapril)
+aprilrest <- aprildif %>%anti_join(aprilfilt, by="sequence") %>% mutate(Order = "zzzz_not_significant")%>%
+                      dplyr::select(-controlapril,-temp_affectapril)
+
+
+abundapril<- rbind(aprilfilt,aprilrest)
+
+asvapril <- SED %>% filter(month%in% "april")
+
+aprilfull <- abundapril %>% 
+            left_join(asvapril, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+            filter(month%in%"april")
+
+# June
+Junedif <- read.csv("../../Time_series_all/Paper/Figures_analysis/Results_June2021/Deseq_differential_abundance_june_BIGTS_SED_ASV_level_zero_inflated_count_model_filtered_50percent.csv", stringsAsFactors = FALSE)
+
+Junefilt <- Junedif %>% filter(padj <0.05) %>%
+               dplyr::select(-controljune,-temp_affectjune)
+Junerest <- Junedif %>%anti_join(Junefilt, by="sequence") %>% mutate(Order = "zzzz_not_significant")%>%
+               dplyr::select(-controljune,-temp_affectjune)
+
+
+abundJune<- rbind(Junefilt,Junerest)
+
+asvJune <- SED %>% filter(month%in% "june")
+
+Junefull <- abundJune %>% 
+            left_join(asvJune, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+            filter(month%in%"june")
+
+# December
+decdif <- read.csv("../../Time_series_all/Paper/Figures_analysis/Results_June2021/Deseq_differential_abundance_december_BIGTS_SED_ASV_level_zero_inflated_count_model_filtered_50percent.csv", stringsAsFactors = FALSE)
+
+decfilt <- decdif %>% filter(padj <0.05) %>% 
+               dplyr::select(-controldecember,-temp_affectdecember)
+decrest <- decdif %>%anti_join(decfilt, by="sequence") %>% mutate(Order = "zzzz_not_significant")%>%
+               dplyr::select(-controldecember,-temp_affectdecember)
+
+
+abunddec<- rbind(decfilt,decrest)
+
+asvdec <- SED %>% filter(month%in% "december")
+
+decfull <- abunddec %>% 
+            left_join(asvdec, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+            filter(month%in%"december")
+
+# September
+septdif <- read.csv("../../Time_series_all/Paper/Figures_analysis/Results_June2021/Deseq_differential_abundance_september_BIGTS_SED_ASV_level_zero_inflated_count_model_filtered_50percent.csv", stringsAsFactors = FALSE)
+
+septfilt <- septdif %>% filter(padj <0.05) %>%
+               dplyr::select(-controlseptember,-temp_affectseptember)
+septrest <- septdif %>%anti_join(septfilt, by="sequence") %>% mutate(Order = "zzzz_not_significant")%>%
+               dplyr::select(-controlseptember,-temp_affectseptember)
+
+
+abundsept<- rbind(septfilt,septrest)
+
+asvsept <- SED %>% filter(month%in% "september")
+
+septfull <- abundsept %>% 
+            left_join(asvsept, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+            filter(month%in%"september")
+
+# combine all
+
+abund.all <- rbind(aprilfull, Junefull, decfull, septfull)
+
+
+# not significant
+april.not.sig <- aprilrest%>% 
+              left_join(asvapril, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+               filter(month%in%"april")
+june.not.sig <- Junerest%>% 
+              left_join(asvJune, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+               filter(month%in%"june")
+dec.not.sig <- decrest%>% 
+              left_join(asvdec, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+               filter(month%in%"december")
+sept.not.sig <- septrest%>% 
+              left_join(asvsept, by=c("sequence","Kingdom","Phylum","Class","Family","Genus","Species"))%>%
+               filter(month%in%"september")
+
+abund.all.rest <- rbind(april.not.sig, june.not.sig, dec.not.sig, sept.not.sig)
+
+# getting 1 % and others
+
+abund.all0.5 <- abund.all%>% 
+  group_by(Order.x,shortcut,bay,month,sample)%>%
+  summarise(relab=sum(relab))%>%
+  summarise(relab=mean(relab))%>%
+  filter(relab >0.01)
+
+abund.allrest <- abund.all %>% anti_join(abund.all0.5, by="sequence") %>% mutate(Order.x = "zzz_Others")
+
+# combined with others under 1 percent and significant over 1 percent
+
+abund.all.combined <- rbind(abund.all0.5, abund.allrest)
+
+
+# Want to get all non significant in one group and then others significant <1 % together
+
+# signifcant within others group
+sig.others <- abund.allrest %>% anti_join(abund.all.rest, by="sequence")
+# not significant ones within others group
+non.sig.others <- abund.all.rest %>% anti_join(sig.others, by="sequence")%>%mutate(Order.x ="zzzz_not_significant")
+
+# combine both tables above with the tables over 1% 
+
+all.combined.final <- rbind(abund.all0.5,sig.others,non.sig.others)# final table
+
+all.combined.final$month<-factor(all.combined.final$month, levels = c("september","december","april","june"))
+
+all.combined.final %>%
+ggplot(aes(x = shortcut, y = relab, fill =Order.x)) +
+geom_bar( position="fill", stat="identity") +
+coord_flip() +
+theme(
+    legend.position = 'bottom'
+  )+
+  xlab('bay') + ylab('relative abundance >1%') +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+  )+
+   scale_fill_manual(values=c("#462a24","#bd5338","#cb8f7a","#e47e3a","#7b5733","#cd9740","#d3c6a0","#dbd049","#edf092",
+"#a9db47","#d5f2ce","#5f8b7a","#0ff29a","#d3f0ed","#452a79","#cdb5d6","#c37dd1","#876985","#c946c9"
+))+
+  facet_grid(~bay+month)+
+  theme(legend.position="bottom")
+
+
+only.sig <- all.combined.final %>% filter(!Order.x %in% c("zzzz_not_significant","zz_Unclassified"))
+only.sig$month<-factor(only.sig$month,  levels = c("september","december","april","june"))
+only.sig%>%
+ggplot(aes(x = shortcut, y = relab, fill =Order.x)) +
+geom_bar( position="fill", stat="identity") +
+coord_flip() +
+    scale_fill_manual(values=c("#d34a77","#ca958e","#dc4532","#8b3a2b","#d37a40","#343029","#d3ac44","#7f6b33","#c7d94b",
+                               "#c7ce9c","#548435","#6dd740","#79d475","#496e54","#64d2ac","#82bfd1","#5a6785","#6b7cd1",
+                               "#3c2766","#6d41c8","#cc9dd1","#d24fca","#954189","#61283c"))+
+
+theme(
+    legend.position = 'bottom'
+  )+
+  xlab('bay') + ylab('relative abundance >1%') +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+  )+
+  facet_grid(~bay+month)+
+  theme(legend.position="bottom")
+
+
+# Genus level on specific Order taxa
+
+# Prepare table for the Fig. on Genus level 
+
+abund.all_all <- abund.all
+abund.allrest_ASV <- abund.all %>% 
+  anti_join(abund.all_all, by="Genus.x") %>% 
+  mutate(Order.x = "zzz_Others")
+sig.others_ASV <- abund.allrest_ASV %>% 
+  anti_join(abund.all.rest, by="sequence")
+non.sig.others_ASV <- abund.all.rest %>% 
+  anti_join(sig.others_ASV, by="sequence")%>%
+  mutate(Genus.x ="zzzz_not_significant")
+all.combined.final.ASV <- rbind(abund.all_all,sig.others_ASV,non.sig.others_ASV)
+
+# Fig genus level
+
+all.combined.final.ASV$month<-factor(all.combined.final.ASV$month, levels = c("september","december","april","june"))
+
+all.combined.final.ASV %>%
+  filter(Order %in% c("Cyanobacteriales","Betaproteobacteriales","Desulfobacterales","Anaerolineales","Flavobacteriales"))%>%
+  group_by(Genus.x,shortcut,bay,month,sample)%>%
+  summarise(relab=sum(relab))%>%
+  summarise(relab=mean(relab))%>%
+ filter(relab > 0.01)%>%
+  ggplot(aes(x = shortcut, y = relab, fill =Genus.x)) +
+geom_bar(position="fill",  stat="identity") +
+coord_flip() +
+theme(
+    legend.position = 'bottom'
+  )+
+  xlab('bay') + ylab('relative abundance >1%') +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1)
+  )+
+ scale_fill_manual(values=c("#842d2e","pink","darkorange","coral","beige","yellow","#4e903f",
+                            "#334e2c","#61d855","#49c1c4","grey76"
+))+
+  facet_grid(~bay+month)+
+  theme(legend.position="bottom")
+
+```
+
+```{r PCA - Chemistry - Supplemental Fig. S2}
+# Principal component analysis of the Env.var 
+# BW
+# Select for BW samples and select for Env.Var to test for. 
+# Table preparation for the PCA
+metasub_pca <- meta %>%
+  filter(material %in% "BW")%>%
+  dplyr::select( phosphate, pH,  sulfate, irontot,iron2,iron3,nitrate.nitrite,oxygen,temperature,depth, sample)%>% 
+  remove_rownames()%>% 
+  column_to_rownames(var="sample")%>%
+  na.omit()##191 left 
+
+# Table preparation for meta table
+metasubBW_pca <- meta %>%
+  filter(material %in% "BW")%>%
+  dplyr::select(reactor3,bay,month,site, phosphate, pH,  sulfate, irontot,iron2,iron3,nitrate.nitrite,oxygen,temperature,depth,oxygen, sample)%>% 
+  remove_rownames()%>% 
+  column_to_rownames(var="sample")%>%
+  na.omit()
+
+#PCA calculation
+pca_res <- prcomp(metasub_pca, scale. = TRUE)
+
+# Plot with color by month
+autoplot(pca_res, data = metasubBW_pca, colour = "month" ,loadings=TRUE, loadings.label=TRUE, shape="bay", size=5)
+
+# SED
+
+metasub_pca <- meta %>%
+  filter(material %in% "SED")%>%
+  dplyr::select( phosphate, pH,  sulfate, irontot,iron2,iron3,nitrate,nitrite,OM,temperature,depth, sample)%>% 
+  remove_rownames()%>% 
+  column_to_rownames(var="sample")%>%
+  na.omit()##183 left 
+
+
+metasubSED_pca <- meta %>%
+  filter(material %in% "SED")%>%
+  dplyr::select(reactor3,bay,month,site, phosphate, pH,  sulfate, irontot,iron2,iron3,nitrate,nitrite,OM,temperature,depth,oxygen, sample)%>% 
+  remove_rownames()%>% 
+  column_to_rownames(var="sample")%>%
+  na.omit()
+
+# PCA calculations
+pca_res <- prcomp(metasub_pca, scale. = TRUE)
+
+# Plot with color by month
+autoplot(pca_res, data = metasubSED_pca, colour = "month" ,loadings=TRUE, loadings.label=TRUE, shape="bay", size=5)
+```
+
+```{r Radarplot - Chemistry - Fig. 2}
+# Radar plot from Env.Var
+# rearrange sampling month
+SED$month <- factor(SED$month,levels=c("september","december","april","june"))
+BW$month <- factor(BW$month,levels=c("september","december","april","june"))
+
+# BW
+
+BWdiscrete <- ggRadar(BW, aes(x=c(phosphate, sulfate,temperature, nitrate.nitrite,pH,irontot,oxygen), 
+                              group=bay, color=bay, facet=month),
+     rescale = T, legend.position = "left",
+     size = 1) +
+     scale_fill_manual(values=c("blue","orange"))+
+     scale_color_manual(values=c("blue","orange"))+
+     scale_y_discrete(breaks = NULL) + # don't show ticks 
+     theme(axis.text.x = element_text(size = 10))+
+     theme_bw()
+
+# SED
+
+SEDdiscrete<- ggRadar(SED, aes(x=c(phosphate, sulfate,OM, nitrate, nitrite,pH,irontot), 
+                               group=bay, color=bay, facet=month),
+     rescale = TRUE, legend.position = "left",
+     size = 1) +
+     scale_fill_manual(values=c("blue","orange"))+
+     scale_color_manual(values=c("blue","orange"))+
+     scale_y_discrete(breaks = NULL) + # don't show ticks 
+     theme(axis.text.x = element_text(size = 10))+
+     theme_bw()
+
+# combine figures
+ ggarrange(SEDdiscrete,BWdiscrete, ncol=2, labels=c("A","B"))
+```
+
+```{r Boxplots - Chemistry - Supplemental Fig. S3}
+# Bosplots of every Env.Var, separated by month. Points indicate the actual samples
+
+# BW
+
+# Boxplot
+# Sulfate
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "BW")%>%
+  ggplot(aes(x = month, y = sulfate)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Sulfate", x="bay",y="mM")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# pH
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "BW")%>%
+  ggplot(aes(x = month, y = pH)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="pH", x="bay",y="pH")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# total Iron
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "BW")%>%
+  ggplot(aes(x = month, y = irontot)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Total Iron", x="bay",y="µM")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# Nitrate plus nitrite
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "BW")%>%
+  ggplot(aes(x = month, y = nitrate.nitrite)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Nitrate plus Nitrite in Combination", x="bay",y="µM")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+
+# Phosphate 
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "BW")%>%
+  filter(!sample %in% "X2081")%>%
+  ggplot(aes(x = month, y = phosphate)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Phosphate", x="bay",y="µM")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# Temperature
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "BW")%>%
+  ggplot(aes(x = month, y = temperature)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Temperature", x="bay",y="°C")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# temp surface
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "BW")%>%
+  ggplot(aes(x = month, y = temperature_surface)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Temperature surface", x="bay",y="°C")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# Oxygen 
+# outlier X13,X14,X15, X2013,X2014,X2015 taken out
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "BW")%>%
+  filter(!sample %in% c("X13","X14","X15","X2013","X2014","X2015"))%>%
+  ggplot(aes(x = month, y = oxygen)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Oxygen", x="bay",y="mg/L")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# combined figures 
+ggarrange(oxygen, temperature, pH, nitrate, irontot, sulfate, phosphate, nrow=3, ncol=3)
+```
+
+```{r Boxplots - Chemistry - Supplemental Fig. S4}
+
+# SED
+# Sulfate
+
+
+# Boxplot
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "SED")%>%
+  ggplot(aes(x = month, y = sulfate)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Sulfate ", x="bay",y="mM")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+
+# pH
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "SED")%>%
+  ggplot(aes(x = month, y = pH)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="pH", x="bay",y="pH")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+
+# total Iron
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "SED")%>%
+  ggplot(aes(x = month, y = irontot)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Total Iron", x="bay",y="µM")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+
+# Nitrate
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "SED")%>%
+  ggplot(aes(x = month, y = nitrate)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Nitrate", x="bay",y="µM")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# Nitrite
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "SED")%>%
+    filter(!sample %in% "X70")%>%
+  ggplot(aes(x = month, y = nitrite)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Nitrite", x="bay",y="µM")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+
+# Phosphate 
+
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "SED")%>%
+  ggplot(aes(x = month, y = phosphate)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = bay,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Phosphate", x="bay",y="µM")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# OM
+meta$month <- factor(meta$month,levels=c("september","december","april","june"))
+
+meta %>%
+  filter(material %in% "SED")%>%
+  ggplot(aes(x = month, y = OM)) +
+  geom_boxplot(color="black", fill="grey76", aes(group= month)) +
+  geom_jitter(aes( colour = site,group=site, size=2))+
+  theme(
+    legend.position = 'bottom'
+  )+
+#scale_color_manual(values=c( "mediumblue","orange2"))+
+  guides(size=guide_legend(order=2),
+         shape= guide_legend(override.aes=list(size=2),
+        colour=guide_legend(override.aes=list(size=4))))+
+  facet_wrap(~bay)+
+  labs(title="Organic Matter", x="bay",y="%")+
+  theme(panel.background = element_rect(fill = "white", colour = "black"))+
+  theme(strip.background = element_rect(colour = "black", fill = "white"))+
+  theme_classic()
+
+# Combine figures 
+chemSED <- ggarrange(nitrate, nitrite,irontot, sulfate, phosphate, OM,pH, nrow=3, ncol=3)
+```
+
+```{r Linear mixed model - chemistry - Supplemental Table S3}
+# Either BW or SED table
+# bay * month are interaction and fixed variables
+# replicate is nested in site, which both are random variables
+
+metaSED <- meta %>% 
+          filter(material %in% "SED")%>%
+          dplyr::select(bay, month, site, replicate, pH)%>% #Choose Env.Var which you want to test
+          na.omit()
+
+B2 <- lme(pH ~ 1 + bay * month, data=metaSED, random=~1|site/replicate, method="REML")# change to Env.Var which need to be tested
+
+anova(B2)
+
+# Pairwise comparison to check for differences between bays at each sampling month
+emmeans(B2, spec="bay",by="month", contr="pairwise")
+
+```
+
+```{r Pearson correlation on Order Level - based on DA analysis results - Supplemental Table S6 - Fig. S7}
+# BW
+# We have to transform the counts from the ASVs to CLR (centered log-ratio) first
+asvsclr_BW <-abund.all0.5 %>%
+  dplyr::select(Order.x,sample, count) %>%
+  group_by(Order.x, sample)%>%
+  summarise(count=sum(count))%>%
+  ungroup()%>%
+  filter(! Order.x %in% c("zz_Unclassified","zzzz_not_significant"))%>% # not interested in those
+  spread(Order.x, count, fill=0)%>%
+  remove_rownames()%>%
+  column_to_rownames(var="sample")%>%
+  t() %>%
+  data.frame() %>% 
+  cmultRepl(method = 'CZM', delta = 0.5, output = 'p-counts') %>%
+  codaSeq.clr(samples.by.row = FALSE) %>%
+  data.frame() %>%
+  tibble::rownames_to_column('Order.x') %>%
+  gather(sample, clr, 2:ncol(.)) %>%
+  left_join(meta, by = c('sample')) %>%
+  replace_na(list(count = 0)) 
+
+##Get the right format, so we have only Order and environmental variables as column and sample as rows left.
+
+Sig.Ord <- asvsclr_BW %>%
+  dplyr::select(Order.x,sample, clr) %>% 
+  spread(Order.x,clr, fill= 0)%>% 
+  left_join(meta, by="sample")%>% 
+  dplyr::select(-year,-shortcut, -month,-season,-name, -material,-replicate,-site,
+                -bay,-reactor3, -nitrate, -nitrite, -iron3,-temp_cat, -OM, -redox,  
+                -temperature_surface)%>% 
+  remove_rownames()%>%
+  column_to_rownames(var="sample")
+
+##Here we can make a plot directly
+set.seed(123)
+
+ ggstatsplot::ggcorrmat(Sig.Ord, #ggcorrmat directly calculate pearson correlation and makes it into an plot
+                      p.adjust.method = "BH",
+                      type="pearson", 
+                      sig.level = 0.05, 
+                      ggthem= ggplot2::theme_light(),
+                      ggcorrplot.args = list(
+                      lab_col = "black",
+                      lab_size = 2,
+                      tl.srt = 90,
+                      pch.col = "black",
+                      pch.cex = 8
+  ),
+                      colors = c("#0072B2", "#D55E00", "#CC79A7"),
+                      insig="blank")
+
+##Or we can decide for a table which we then can save as csv
+
+set.seed(123)
+corrstat <- ggstatsplot::ggcorrmat(Sig.Ord, p.adjust.method ="BH",type="pearson",sig.level=0.05, output="dataframe" )
+
+#write.csv(corrstat,"../../xx.csv")
+
+
+
+# SED
+asvsclr_SED <-abund.all0.5 %>%
+  dplyr::select(Order.x,sample, count) %>%
+  group_by(Order.x, sample)%>%
+  summarise(count=sum(count))%>%
+  ungroup()%>%
+  filter(! Order.x %in% c("zz_Unclassified","zzzz_not_significant"))%>%
+  spread(Order.x, count, fill=0)%>%
+  remove_rownames()%>%
+  column_to_rownames(var="sample")%>%
+  t() %>%
+  data.frame() %>% 
+  cmultRepl(method = 'CZM', delta = 0.5, output = 'p-counts') %>%
+  codaSeq.clr(samples.by.row = FALSE) %>%
+  data.frame() %>%
+  tibble::rownames_to_column('Order.x') %>%
+  gather(sample, clr, 2:ncol(.)) %>%
+  left_join(meta, by = c('sample')) %>%
+  replace_na(list(count = 0)) 
+
+
+Sig.Ord <- asvsclr_SED %>%
+  dplyr::select(Order.x,sample, clr) %>% 
+  spread(Order.x,clr, fill= 0)%>% 
+  left_join(meta, by="sample")%>% 
+  dplyr::select(-year,-shortcut, -month,-season,-name, 
+                -material,-replicate,-site,-bay,-reactor3, -nitrate.nitrite, 
+                -iron3,-temp_cat,  -redox,  -temperature_surface)%>% 
+  remove_rownames()%>%
+  column_to_rownames(var="sample")
+
+set.seed(123)
+
+ggstatsplot::ggcorrmat(Sig.Ord, 
+                      p.adjust.method = "BH",
+                      type="pearson", 
+                      sig.level = 0.05, 
+                      ggthem= ggplot2::theme_light(),
+                      ggcorrplot.args = list(
+                      lab_col = "black",
+                      lab_size = 2,
+                      tl.srt = 90,
+                      pch.col = "black",
+                      pch.cex = 8
+  ),
+                      colors = c("#0072B2", "#D55E00", "#CC79A7"),
+                      insig="blank")
+
+
+set.seed(123)
+corrstat <- ggstatsplot::ggcorrmat(Sig.Ord, p.adjust.method ="BH",type="pearson",sig.level=0.05, output="dataframe" )
+
+#write.csv(corrstat,"xx.csv")
+```
+
+```{r SIMPER analysis - Supplemental Table S4}
+# BW
+# SIMPER analysis based on ORDER level counts
+OrderBW <- BW %>%
+  group_by(Order,sample)%>%
+  summarise(count = sum(count))%>%
+  ungroup()%>%
+  filter(!Order %in% "zz_Unclassified")%>%
+  spread(Order,count, fill= 0) %>% 
+  remove_rownames() %>% 
+  column_to_rownames(var = "sample")
+
+metasubBW_sub <- meta %>% 
+  filter(material %in% "BW")%>%
+  filter(!sample %in% "X2061")
+
+(sim <- with(metasubBW_sub , simper(OrderBW, bay)))
+ 
+ "summary"(sim, ordered=TRUE)
+
+sim.data <- data.frame(unclass(summary(sim, ordered=TRUE)), check.names = FALSE, stringsAsFactors = FALSE)
+
+# Overall dissimilarity between bacterial communities based on SIMPER analysis
+lapply(sim, FUN=function(x) {x$overall}) 
+#write.csv(sim.data, file = "xx.csv")
+
+# SED
+# SIMPER analysis based on ORDER level counts
+OrderSED <- SED %>%
+  group_by(Order,sample)%>%
+  summarise(count = sum(count))%>%
+  ungroup()%>%
+  filter(!Order %in% "zz_Unclassified")%>%
+  spread(Order,count, fill= 0) %>% 
+  remove_rownames() %>% 
+  column_to_rownames(var = "sample")
+
+metasubSED_sub <- meta %>% 
+  filter(material %in% "SED")%>%
+  filter(!sample %in% "X51")
+
+(sim <- with(metasubSED_sub , simper(OrderSED, bay)))
+ 
+ "summary"(sim, ordered=TRUE)
+
+sim.data <- data.frame(unclass(summary(sim, ordered=TRUE)), check.names = FALSE, stringsAsFactors = FALSE)
+
+##Overall dissimilarity between bacterial communities based on SIMPER analysis
+lapply(sim, FUN=function(x) {x$overall}) 
+#write.csv(sim.data, file = "xx.csv")
+```
+
+```{r PICRUST2 analysis - Fig. 7}
+# Picrust tables
+# BW
+pathwayBW <- read.table("../Paper/Figures_analysis/Results_June2021/Picrust_SED_sig_diff_abund/BW/pathway_out/path_abun_unstrat_descrip.tsv.gz",sep = '\t', header = TRUE)
+
+KO_metagenomeBW <- read.table("../Paper/Figures_analysis/Results_June2021/Picrust_SED_sig_diff_abund/BW/KO_metagenome_out/pred_metagenome_unstrat_descrip.tsv.gz",sep = '\t', header = TRUE)
+
+KO_metagenomeBW <- KO_metagenomeBW%>% 
+  dplyr::rename(KO = function.)
+
+EC_metagenomeBW <- read.delim("../Paper/Figures_analysis/Results_June2021/Picrust_SED_sig_diff_abund/BW/EC_metagenome_out/pred_metagenome_unstrat_descrip.tsv.gz",sep = '\t', header = TRUE)
+
+
+
+# SED
+pathway <- read.table("../Paper/Figures_analysis/Results_June2021/Picrust_SED_sig_diff_abund/SED/pathway_out/path_abun_unstrat_descrip.tsv",sep = '\t', header = TRUE)
+
+KO_metagenome <- read.table("../Paper/Figures_analysis/Results_June2021/Picrust_SED_sig_diff_abund/SED/KO_metagenome_out/pred_metagenome_unstrat_descrip.tsv",sep = '\t', header = TRUE)
+
+KO_metagenome <- KO_metagenome%>% 
+  dplyr::rename(KO = function.)
+
+EC_metagenome <- read.delim("../Paper/Figures_analysis/Results_June2021/Picrust_SED_sig_diff_abund/SED/EC_metagenome_out/pred_metagenome_unstrat_descrip.tsv",sep = '\t', header = TRUE)
+
+
+KEGGlist <- read.delim("../../Time_series_all/Paper/Figures_analysis/Results_June2021/ko00001_ed.txt")
+
+# KO identifier 
+
+# BW
+KO_overviewBW <- KO_metagenomeBW %>% 
+                left_join(KEGGlist, by="KO")%>%
+                gather(sample,count_abund, 3:193)%>%
+                filter(count_abund > 0)%>%
+                left_join(meta, by="sample")
+# SED
+KO_overview <- KO_metagenome %>% 
+                left_join(KEGGlist, by="KO")%>%
+                gather(sample,count_abund, 3:193)%>%
+                filter(count_abund > 0)%>%
+                left_join(meta, by="sample")
+
+
+# Differential abundance analysis with ALDEx2 on Picrust KO-identifier data
+# BW
+meta_phyBW <- meta %>% 
+  filter(material=="BW")%>%
+  filter(!sample %in% "X2061")%>%
+  dplyr::select(sample, bay)
+meta_phyBW <- meta_phyBW %>% remove_rownames %>% column_to_rownames(var="sample")
+meta_phyBW<- meta_phyBW[ order(rownames(meta_phyBW)) , ,drop=F]
+  meta_tableBW <-data.frame(sample_data(meta_phyBW))
+  meta_tableBW <- meta_tableBW%>% mutate(bay = bay%>% as.character())
+  
+
+KO_aldexBW <- KO_metagenomeBW %>%
+  gather(sample,count_abund, 3:193)%>%
+                filter(count_abund > 0)
+
+KO_aldexBW$count_abund <- round(KO_aldexBW$count_abund, digits=0)
+
+# Differential abundance with ALDEx    
+diffasvBW <- KO_aldexBW%>% 
+  dplyr::select(KO, sample, count_abund)%>% 
+  spread(sample, count_abund,fill=0 ) %>% 
+  column_to_rownames("KO")%>% 
+  ALDEx2::aldex(conditions=meta_table$bay)%>%
+  tibble::rownames_to_column("KO")
+
+diffasv1BW <- diffasvBW %>% 
+  left_join(KEGGlist, by="KO")
+
+diffasv1BW <- diffasv1BW %>% filter(we.eBH < 0.05 & wi.eBH < 0.05) #Filter only significant
+
+# We are only interested in KO identifiers within the energy metabolism
+diffasv_sumBW <- diffasv1BW %>% 
+  filter(Highest %in% c("09100 Metabolism")) %>%
+  filter(Secondhighest %in% "09102 Energy metabolism")
+
+# Plot
+p <- ggplot(diffasv_sumBW, aes(x=gene_info, y=effect, fill=Thirdhighest))+
+      geom_bar(stat="identity")+
+      theme_minimal()+
+      coord_flip()+
+    annotate(geom="text", x=3, y=1, label="TEMP_AFFECT",
+              color="red")+
+    annotate(geom="text", x=3, -1, label="CONTROL", color="green")+
+  ggtitle("Differential Abundance with ALDEx2")
+
+p
+
+
+# SED
+
+meta_phy <- meta %>% 
+  filter(material=="SED")%>%
+  filter(!sample %in% "X51")%>%
+  dplyr::select(sample, bay)
+meta_phy <- meta_phy %>% remove_rownames %>% column_to_rownames(var="sample")
+meta_phy<- meta_phy[ order(rownames(meta_phy)) , ,drop=F]
+  meta_table <-data.frame(sample_data(meta_phy))
+  meta_table <- meta_table%>% mutate(bay = bay%>% as.character())
+  
+KO_aldex <- KO_metagenome %>%
+  gather(sample,count_abund, 3:193)%>%
+                filter(count_abund > 0)
+
+KO_aldex$count_abund <- round(KO_aldex$count_abund, digits=0)
+    
+diffasv <- KO_aldex%>% 
+  dplyr::select(KO, sample, count_abund)%>% 
+  spread(sample, count_abund,fill=0 ) %>% 
+  column_to_rownames("KO")%>% 
+  ALDEx2::aldex(conditions=meta_table$bay)%>%
+  tibble::rownames_to_column("KO")
+
+diffasv1 <- diffasv %>% 
+  left_join(KEGGlist, by="KO")
+
+
+
+diffasv_sum <- diffasv1 %>% 
+filter(!between(effect, -0.5, 0.5))%>%
+  filter(Highest %in% c("09100 Metabolism")) %>%
+  filter(Secondhighest %in% "09102 Energy metabolism")
+
+# Plot
+p <- ggplot(diffasv_sum, aes(x=gene_info, y=effect, fill=Thirdhighest))+
+      geom_bar(stat="identity")+
+      scale_fill_manual(values=c("#4b3b3d","#c15142","#bf9d55","#8fcd52","#7ab899","#9095c2","#7645b7","#c35398"))+
+      theme_minimal()+
+      coord_flip()+
+    annotate(geom="text", x=3, y=1, label="TEMP_AFFECT",
+              color="red")+
+    annotate(geom="text", x=3, -1, label="CONTROL", color="green")+
+  ggtitle("Differential Abundance with ALDEx2")
+
+p
+```
+
+```{r session-info}
+# Display current R session information
+sessionInfo()
+```
+
